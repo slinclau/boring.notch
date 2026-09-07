@@ -13,6 +13,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case appearance
     case media
+    case notifications
     case calendar
     case osd
     case battery
@@ -29,6 +30,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: "General"
         case .appearance: "Appearance"
         case .media: "Media"
+        case .notifications: "Notifications"
         case .calendar: "Calendar"
         case .osd: "OSD"
         case .battery: "Battery"
@@ -45,6 +47,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: "gear"
         case .appearance: "eye"
         case .media: "play.laptopcomputer"
+        case .notifications: "bell.badge"
         case .calendar: "calendar"
         case .osd: "dial.medium.fill"
         case .battery: "battery.100.bolt"
@@ -85,29 +88,31 @@ struct SettingsView: View {
                 case .general:
                     GeneralSettings()
                 case .appearance:
-                    Appearance()
+                    AppearanceSettingsView()
                 case .media:
-                    Media()
+                    MediaSettingsView()
+                case .notifications:
+                    NotificationSettingsView()
                 case .calendar:
                     CalendarSettings()
                 case .osd:
                     OSDSettings()
                 case .battery:
-                    Charge()
+                    BatterySettingsView()
                 case .shelf:
-                    Shelf()
+                    ShelfSettingsView()
                 case .mirror:
-                    MirrorSettings()
+                    WebcamSettingsView()
                 case .shortcuts:
-                    Shortcuts()
+                    ShortcutsSettingsView()
                 case .advanced:
-                    Advanced()
+                    AdvancedSettingsView()
                 case .about:
                     if let controller = updaterController {
-                        About(updaterController: controller)
+                        AboutView(updaterController: controller)
                     } else {
                         // Fallback with a default controller
-                        About(
+                        AboutView(
                             updaterController: SPUStandardUpdaterController(
                                 startingUpdater: false, updaterDelegate: nil,
                                 userDriverDelegate: nil))

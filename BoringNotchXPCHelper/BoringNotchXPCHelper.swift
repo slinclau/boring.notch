@@ -10,7 +10,6 @@ import ApplicationServices
 import IOKit
 
 class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
-
     private weak var connection: NSXPCConnection?
 
     private let lunarStateQueue = DispatchQueue(label: "BoringNotchXPCHelper.lunar.state")
@@ -78,6 +77,96 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         }
     }
     
+    // MARK: - Notification Center banners
+
+    /// One watcher for the whole helper: `BoringNotchXPCHelper` is created per
+    /// connection, the AX observer must not be.
+    private static let watcher = NotificationWatcher()
+
+    @objc func startNotificationWatching(with reply: @escaping (Bool) -> Void) {
+        // Capture the delegate for this connection before hopping queues —
+        // NSXPCConnection.current() is only valid inside the incoming call.
+        //
+        // Cast to BoringNotchXPCAppDelegate, not its parent protocol: the
+        // proxy's conformance is built from the exact interface the
+        // connection was configured with, so casting to the parent can
+        // return nil and silently swallow every callback.
+        let connection = NSXPCConnection.current()
+        let proxy = connection?.remoteObjectProxyWithErrorHandler { error in
+            NSLog("[boringNotch] notification callback failed: \(error.localizedDescription)")
+        }
+        let delegate = proxy as? BoringNotchXPCAppDelegate
+
+        if delegate == nil {
+            NSLog("[boringNotch] could not obtain notification delegate proxy — banners will not reach the app")
+        }
+
+        // The AX observer needs a live run loop; the helper's is on main.
+        DispatchQueue.main.async {
+            let watcher = Self.watcher
+            watcher.onBanner = { notification in
+                NSLog("[boringNotch] captured banner: app=\(notification.appName ?? "-") bundle=\(notification.bundleID ?? "-") title=\(notification.title ?? "-") delegate=\(delegate == nil ? "nil" : "ok")")
+                delegate?.notificationDidAppear([
+                    "token": notification.token,
+                    "appName": notification.appName ?? "",
+                    "bundleID": notification.bundleID ?? "",
+                    "title": notification.title ?? "",
+                    "subtitle": notification.subtitle ?? "",
+                    "body": notification.body ?? "",
+                    "actions": notification.actions.joined(separator: "\n")
+                ])
+            }
+            watcher.onBannerGone = { delegate?.notificationDidDisappear($0) }
+            let started = watcher.start()
+            NSLog("[boringNotch] notification watcher start -> \(started), AX trusted: \(AXIsProcessTrusted())")
+            reply(started)
+        }
+    }
+
+    @objc func stopNotificationWatching() {
+        DispatchQueue.main.async { Self.watcher.stop() }
+    }
+
+    @objc func replyToNotification(_ token: String, text: String, with reply: @escaping (Bool) -> Void) {
+        // The watcher's reply path does bounded waiting on the banner's AX
+        // hierarchy; it runs on the watcher's reply queue, never on main —
+        // the helper's main queue drives the banner poll and hold refresh.
+        Self.watcher.replyOnQueue(token: token, text: text, completion: reply)
+    }
+
+    /// Sends an iMessage directly through the Messages scripting
+    /// dictionary, bypassing the notification entirely. The app falls back
+    /// to this when the AX reply above fails because the banner has faded —
+    /// for Messages that recovers a real send instead of a clipboard
+    /// hand-off. No other supported app offers an equivalent.
+    @objc func sendIMessage(_ text: String, toChatNamed name: String, with reply: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async { reply(MessagesSender.send(text, toChatNamed: name)) }
+    }
+
+    @objc func performNotificationAction(_ token: String, name: String, with reply: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async { reply(Self.watcher.performAction(token: token, name: name)) }
+    }
+
+    @objc func openNotification(_ token: String, with reply: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async { reply(Self.watcher.open(token: token)) }
+    }
+
+    @objc func notificationDebugDump(with reply: @escaping (String) -> Void) {
+        DispatchQueue.main.async { reply(Self.watcher.debugDump()) }
+    }
+
+    @objc func holdNotification(_ token: String) {
+        DispatchQueue.main.async { Self.watcher.hold(token: token) }
+    }
+
+    @objc func releaseNotification(_ token: String) {
+        DispatchQueue.main.async { Self.watcher.release(token: token) }
+    }
+
+    @objc func setNotchOpen(_ open: Bool) {
+        DispatchQueue.main.async { Self.watcher.notchOpen = open }
+    }
+
     private class KeyboardBrightnessClient {
         private static let keyboardID: UInt64 = 1
         private var clientInstance: NSObject?
@@ -99,8 +188,6 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
                 clientInstance = cls.init()
             }
         }
-
-        var isAvailable: Bool { clientInstance != nil }
 
         func currentBrightness() -> Float? {
             guard let clientInstance,
@@ -129,10 +216,6 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     }
 
     private static let keyboardClient = KeyboardBrightnessClient()
-
-    @objc func isKeyboardBrightnessAvailable(with reply: @escaping (Bool) -> Void) {
-        reply(Self.keyboardClient.isAvailable)
-    }
 
     @objc func currentKeyboardBrightness(with reply: @escaping (NSNumber?) -> Void) {
         reply(Self.keyboardClient.currentBrightness().map { NSNumber(value: $0) })
@@ -163,12 +246,6 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         }
 
         return mainDisplayID
-    }
-
-    @objc func isScreenBrightnessAvailable(with reply: @escaping (Bool) -> Void) {
-        let displayID = brightnessDisplayID()
-        var b: Float = 0
-        reply(displayServicesGetBrightness(displayID: displayID, out: &b) || ioServiceFor(displayID: displayID) != nil)
     }
 
     @objc func currentScreenBrightness(with reply: @escaping (NSNumber?) -> Void) {
@@ -206,10 +283,17 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         reply(false)
     }
     
-    @objc func adjustScreenBrightness(by value: Float, with reply: @escaping (Bool) -> Void) {
+    @objc func adjustScreenBrightness(by value: Float, with reply: @escaping (NSNumber?) -> Void) {
         let displayID = brightnessDisplayID()
         if displayServicesSetBrightnessSmooth(displayID: displayID, value: value) {
-            reply(true)
+            // Read back inside the helper so the client pays for one RPC
+            // instead of two (adjust + currentScreenBrightness).
+            var b: Float = 0
+            if displayServicesGetBrightness(displayID: displayID, out: &b) {
+                reply(NSNumber(value: b))
+                return
+            }
+            reply(nil)
             return
         }
         if let io = ioServiceFor(displayID: displayID) {
@@ -218,12 +302,12 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
                 let target = max(0, min(1, ioCurrent + value))
                 let ok = IODisplaySetFloatParameter(io, 0, kIODisplayBrightnessKey as CFString, target) == kIOReturnSuccess
                 IOObjectRelease(io)
-                reply(ok)
+                reply(ok ? NSNumber(value: target) : nil)
                 return
             }
             IOObjectRelease(io)
         }
-        reply(false)
+        reply(nil)
     }
 
     // MARK: - Lunar Events
@@ -272,8 +356,8 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
             process.executableURL = self.lunarExecutableURL
             process.arguments = ["@", "listen", "--only-user-adjustments", "-j"]
 
-            let pipeHandler = JSONLinesPipeHandler(decoder: JSONDecoder())
-            process.standardOutput = pipeHandler.getPipe()
+            let pipeHandler = JSONLinesPipeHandler()
+            process.standardOutput = pipeHandler.outputPipe
             process.standardError = FileHandle.nullDevice
 
             process.terminationHandler = { [weak self] _ in
@@ -318,7 +402,7 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
             self.lunarProcess = nil
 
             if let pipeHandler = self.lunarPipeHandler {
-                Task { await pipeHandler.close() }
+                pipeHandler.close()
             }
 
             self.lunarPipeHandler = nil
@@ -422,88 +506,8 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
 
 // MARK: - Lunar Parsing
 
-private struct LunarBrightnessEvent: Decodable {
+private struct LunarBrightnessEvent: Decodable, Sendable {
     let brightness: Double
     let display: Int
-
-    init(from decoder: NSCoder) {
-        display = decoder.decodeInteger(forKey: "display")
-        brightness = decoder.decodeDouble(forKey: "brightness")
-    }
 }
 
-private actor JSONLinesPipeHandler {
-    nonisolated let pipe: Pipe
-    private let fileHandle: FileHandle
-    private var buffer = ""
-    private let decoder: JSONDecoder
-
-    init(decoder: JSONDecoder = JSONDecoder()) {
-        let pipe = Pipe()
-        self.pipe = pipe
-        self.fileHandle = pipe.fileHandleForReading
-        self.decoder = decoder
-    }
-
-    nonisolated func getPipe() -> Pipe {
-        return pipe
-    }
-
-    func readJSONLines<T: Decodable>(as type: T.Type, onLine: @escaping (T) -> Void) async {
-        do {
-            try await processLines(as: type) { decodedObject in
-                onLine(decodedObject)
-            }
-        } catch {
-            // Ignore stream errors to keep the helper lightweight.
-        }
-    }
-
-    private func processLines<T: Decodable>(as type: T.Type, onLine: @escaping (T) -> Void) async throws {
-        while true {
-            let data = try await readData()
-            guard !data.isEmpty else { break }
-
-            if let chunk = String(data: data, encoding: .utf8) {
-                buffer.append(chunk)
-
-                while let range = buffer.range(of: "\n") {
-                    let line = String(buffer[..<range.lowerBound])
-                    buffer = String(buffer[range.upperBound...])
-
-                    if !line.isEmpty {
-                        processJSONLine(line, as: type, onLine: onLine)
-                    }
-                }
-            }
-        }
-    }
-
-    private func processJSONLine<T: Decodable>(_ line: String, as type: T.Type, onLine: @escaping (T) -> Void) {
-        guard let data = line.data(using: .utf8) else { return }
-        if let decodedObject = try? decoder.decode(T.self, from: data) {
-            onLine(decodedObject)
-        }
-    }
-
-    private func readData() async throws -> Data {
-        return try await withCheckedThrowingContinuation { continuation in
-            fileHandle.readabilityHandler = { handle in
-                let data = handle.availableData
-                handle.readabilityHandler = nil
-                continuation.resume(returning: data)
-            }
-        }
-    }
-
-    func close() async {
-        do {
-            fileHandle.readabilityHandler = nil
-
-            try fileHandle.close()
-            try pipe.fileHandleForWriting.close()
-        } catch {
-            // Ignore close errors.
-        }
-    }
-}

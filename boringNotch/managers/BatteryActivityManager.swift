@@ -4,17 +4,9 @@ import IOKit.ps
 
 /// Manages and monitors battery status changes on the device
 /// - Note: This class uses the IOKit framework to monitor battery status
-class BatteryActivityManager {
+final class BatteryActivityManager {
 
     static let shared = BatteryActivityManager()
-
-    var onBatteryLevelChange: ((Float) -> Void)?
-    var onMaxCapacityChange: ((Float?) -> Void)?
-    var onPowerModeChange: ((Bool) -> Void)?
-    var onPowerSourceChange: ((Bool) -> Void)?
-    var onChargingChange: ((Bool) -> Void)?
-    var onTimeToFullChargeChange: ((Int) -> Void)?
-    var onTimeToDischargeChange: ((Int) -> Void)?
 
     private var batterySource: CFRunLoopSource?
     private var observers: [(BatteryEvent) -> Void] = []
@@ -55,6 +47,7 @@ class BatteryActivityManager {
         case timeToFullChargeChanged(time: Int)
         case timeToDischargeChanged(time: Int)
         case maxCapacityChanged(capacity: Float?)
+        case adapterWattageChanged(watts: Int)
         case error(description: String)
     }
 
@@ -175,6 +168,12 @@ class BatteryActivityManager {
                 current: batteryInfo.maxCapacity,
                 eventGenerator: { .maxCapacityChanged(capacity: $0) }
             )
+
+            checkAndNotify(
+                previous: previousInfo.maxAdapterWatts,
+                current: batteryInfo.maxAdapterWatts,
+                eventGenerator: { .adapterWattageChanged(watts: $0) }
+            )
         } else {
             // First time notification
             enqueueNotification(.powerSourceChanged(isPluggedIn: batteryInfo.isPluggedIn))
@@ -184,22 +183,11 @@ class BatteryActivityManager {
             enqueueNotification(.timeToFullChargeChanged(time: batteryInfo.timeToFullCharge))
             enqueueNotification(.timeToDischargeChanged(time: batteryInfo.timeToDischarge))
             enqueueNotification(.maxCapacityChanged(capacity: batteryInfo.maxCapacity))
+            enqueueNotification(.adapterWattageChanged(watts: batteryInfo.maxAdapterWatts))
         }
 
         // Update previous battery info
         previousBatteryInfo = batteryInfo
-
-        // Trigger optional callbacks
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.onBatteryLevelChange?(batteryInfo.currentCapacity)
-            self.onPowerSourceChange?(batteryInfo.isPluggedIn)
-            self.onChargingChange?(batteryInfo.isCharging)
-            self.onPowerModeChange?(batteryInfo.isInLowPowerMode)
-            self.onTimeToFullChargeChange?(batteryInfo.timeToFullCharge)
-            self.onTimeToDischargeChange?(batteryInfo.timeToDischarge)
-            self.onMaxCapacityChange?(batteryInfo.maxCapacity)
-        }
     }
 
     /// Enqueues a notification to be processed using the concurrency-based queue actor.
@@ -282,19 +270,25 @@ class BatteryActivityManager {
                 batteryInfo.timeToDischarge = timeToDischarge
             }
 
+            // Rated adapter wattage; nil on battery or unreported, stays 0
+            if let adapterDetails = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any],
+               let watts = adapterDetails[kIOPSPowerAdapterWattsKey as String] as? Int {
+                batteryInfo.maxAdapterWatts = watts
+            }
+
             return batteryInfo
             
         } catch BatteryError.powerSourceUnavailable {
-            print("⚠️ Error: Power source information unavailable")
+            Log.battery.error("⚠️ Error: Power source information unavailable")
             return defaultBatteryInfo
         } catch BatteryError.batteryInfoUnavailable(let reason) {
-            print("⚠️ Error: Battery information unavailable - \(reason)")
+            Log.battery.error("⚠️ Error: Battery information unavailable - \(reason)")
             return defaultBatteryInfo
         } catch BatteryError.batteryParameterMissing(let parameter) {
-            print("⚠️ Error: Battery parameter missing - \(parameter)")
+            Log.battery.error("⚠️ Error: Battery parameter missing - \(parameter)")
             return defaultBatteryInfo
         } catch {
-            print("⚠️ Error: Unexpected error getting battery info - \(error.localizedDescription)")
+            Log.battery.error("⚠️ Error: Unexpected error getting battery info - \(error.localizedDescription)")
             return defaultBatteryInfo
         }
     }
@@ -378,4 +372,5 @@ struct BatteryInfo {
     var isInLowPowerMode: Bool
     var timeToFullCharge: Int
     var timeToDischarge: Int
+    var maxAdapterWatts: Int = 0
 }

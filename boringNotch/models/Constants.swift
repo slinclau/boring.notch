@@ -9,14 +9,13 @@ import SwiftUI
 import Defaults
 
 // MARK: - File System Paths
-private let availableDirectories = FileManager
-    .default
-    .urls(for: .documentDirectory, in: .userDomainMask)
-let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-let bundleIdentifier = Bundle.main.bundleIdentifier!
+let documentsDirectory: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    ?? URL(fileURLWithPath: NSTemporaryDirectory())
+let bundleIdentifier: String = Bundle.main.bundleIdentifier ?? "theboringteam.boringnotch"
 let appVersion = "\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""))"
 
-let temporaryDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+let temporaryDirectory: URL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+    ?? URL(fileURLWithPath: NSTemporaryDirectory())
 let spacing: CGFloat = 16
 
 enum CalendarSelectionState: Codable, Defaults.Serializable {
@@ -102,9 +101,6 @@ struct AppLanguage: RawRepresentable, Hashable, Identifiable, Defaults.Serializa
 
 // Define notification names at file scope
 extension Notification.Name {
-    // MARK: - Media
-    static let mediaControllerChanged = Notification.Name("mediaControllerChanged")
-    
     // MARK: - Display
     static let selectedScreenChanged = Notification.Name("SelectedScreenChanged")
     static let notchHeightChanged = Notification.Name("NotchHeightChanged")
@@ -133,17 +129,34 @@ enum MediaControllerType: String, CaseIterable, Identifiable, Defaults.Serializa
     
     var id: String { self.rawValue }
 
-    var localizedString: String {
+    init?(nowPlayingBundleIdentifier bundleIdentifier: String) {
+        switch bundleIdentifier {
+        case "com.apple.Music":
+            self = .appleMusic
+        case "com.spotify.client":
+            self = .spotify
+        case YouTubeMusicConfiguration.default.bundleIdentifier:
+            self = .youtubeMusic
+        default:
+            return nil
+        }
+    }
+
+    var localizedResource: LocalizedStringResource {
         switch self {
         case .nowPlaying:
-            return NSLocalizedString("Now Playing", comment: "")
+            "Now Playing"
         case .appleMusic:
-            return "Apple Music"
+            "Apple Music"
         case .spotify:
-            return "Spotify"
+            "Spotify"
         case .youtubeMusic:
-            return "YouTube Music"
+            "YouTube Music"
         }
+    }
+
+    var localizedString: String {
+        String(localized: localizedResource)
     }
 }
 
@@ -282,6 +295,7 @@ extension Defaults.Keys {
     static let showBatteryIndicator = Key<Bool>("showBatteryIndicator", default: true)
     static let showBatteryPercentage = Key<Bool>("showBatteryPercentage", default: true)
     static let showPowerStatusIcons = Key<Bool>("showPowerStatusIcons", default: true)
+    static let showChargingWattage = Key<Bool>("showChargingWattage", default: true)
     
     // MARK: Downloads
     static let enableDownloadListener = Key<Bool>("enableDownloadListener", default: true)
@@ -292,6 +306,36 @@ extension Defaults.Keys {
     // MARK: OSD
     static let osdReplacement = Key<Bool>("osdReplacement", default: false)
     static let inlineOSD = Key<Bool>("inlineOSD", default: false)
+
+    // MARK: Layout
+    /// Swaps the opened notch for a smaller, player-only layout: no tab
+    /// bar, calendar or mirror. Off by default so existing users keep the
+    /// layout they already have.
+    static let compactMode = Key<Bool>("compactMode", default: false)
+
+    // MARK: Notifications
+    /// Off by default: mirroring banners needs Accessibility access.
+    static let notificationLiveActivity = Key<Bool>("notificationLiveActivity", default: false)
+    static let notificationsFromAllApps = Key<Bool>("notificationsFromAllApps", default: false)
+    static let notificationAllowedApps = Key<Set<String>>(
+        "notificationAllowedApps",
+        default: [
+            "com.apple.MobileSMS",       // Messages
+            "com.apple.FaceTime",
+            "com.apple.mail",
+            "com.microsoft.Outlook",
+            "net.whatsapp.WhatsApp",
+            "ru.keepcoder.Telegram",     // Telegram Desktop (App Store build)
+            "com.tdesktop.Telegram",
+            "com.hnc.Discord",
+            "com.anthropic.claudefordesktop"
+        ]
+    )
+    /// Off by default: a new capability, even though it runs entirely
+    /// on-device with no network calls. Only takes effect on macOS 26+ with
+    /// Apple Intelligence enabled — see SmartReplyManager.
+    static let smartRepliesEnabled = Key<Bool>("smartRepliesEnabled", default: false)
+
     static let enableGradient = Key<Bool>("enableGradient", default: false)
     static let systemEventIndicatorShadow = Key<Bool>("systemEventIndicatorShadow", default: false)
     static let systemEventIndicatorUseAccent = Key<Bool>("systemEventIndicatorUseAccent", default: false)
@@ -321,12 +365,19 @@ extension Defaults.Keys {
     static let autoScrollToNextEvent = Key<Bool>("autoScrollToNextEvent", default: true)
     static let calendarWeekView = Key<Bool>("calendarWeekView", default: false)
     static let weekStartDay = Key<WeekStartDay>("weekStartDay", default: .system)
+    static let joinMeetingOnEventTap = Key<Bool>("joinMeetingOnEventTap", default: true)
     
     // MARK: Fullscreen Media Detection
     static let hideNotchOption = Key<HideNotchOption>("hideNotchOption", default: .nowPlayingOnly)
     
     // MARK: Media Controller
     static let mediaController = Key<MediaControllerType>("mediaController", default: defaultMediaController)
+    static let didChooseMediaController = Key<Bool>("didChooseMediaController", default: false)
+    static let didMigrateMediaControllerChoice = Key<Bool>("didMigrateMediaControllerChoice", default: false)
+    static let lastSupportedNowPlayingBundleIdentifier = Key<String?>(
+        "lastSupportedNowPlayingBundleIdentifier",
+        default: nil
+    )
     
     // MARK: Advanced Settings
     static let useCustomAccentColor = Key<Bool>("useCustomAccentColor", default: false)
@@ -337,13 +388,9 @@ extension Defaults.Keys {
     // Normalize scroll/gesture direction so when macOS "Natural scrolling" is disabled, it doesn't invert gestures
     static let normalizeGestureDirection = Key<Bool>("normalizeGestureDirection", default: true)
     
-    // Helper to determine the default media controller based on NowPlaying deprecation status
+    // Keep the default stable. Runtime availability is handled by MusicManager.
     static var defaultMediaController: MediaControllerType {
-        if MusicManager.shared.isNowPlayingDeprecated {
-            return .appleMusic
-        } else {
-            return .nowPlaying
-        }
+        .nowPlaying
     }
 
     static let didClearLegacyURLCacheV1 = Key<Bool>("didClearLegacyURLCache_v1", default: false)

@@ -21,7 +21,7 @@ struct InlineOSD: View {
             HStack(spacing: 5) {
                 OSDIconView(eventType: type, icon: icon, value: value, accent: accent)
                 
-                Text(Type2Name(type))
+                Text(osdTypeName(type))
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
@@ -62,7 +62,7 @@ struct InlineOSD: View {
                                 .allowsTightening(true)
                                 .multilineTextAlignment(.trailing)
                         } else if Defaults[.showClosedNotchOSDPercentage] {
-                            Text("\(Int(value * 100))%")
+                            Text(value, format: .percent.precision(.fractionLength(0)))
                                 .font(.caption)
                                 .fontWeight(.medium)
                                 .foregroundStyle(.gray)
@@ -79,7 +79,7 @@ struct InlineOSD: View {
         .frame(height: vm.closedNotchSize.height + (hoverAnimation ? 8 : 0), alignment: .center)
     }
     
-    func Type2Name(_ type: SneakContentType) -> String {
+    func osdTypeName(_ type: SneakContentType) -> String {
         switch(type) {
             case .volume:
                 return NSLocalizedString("Volume", comment: "")

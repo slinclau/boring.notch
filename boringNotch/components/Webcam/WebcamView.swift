@@ -9,7 +9,7 @@ import AVFoundation
 import Defaults
 import SwiftUI
 
-struct CameraPreviewView: View {
+struct WebcamView: View {
     @EnvironmentObject var vm: BoringViewModel
     @ObservedObject var webcamManager: WebcamManager
     
@@ -21,7 +21,7 @@ struct CameraPreviewView: View {
         GeometryReader { geometry in
             ZStack {
                 if let previewLayer = webcamManager.previewLayer {
-                    CameraPreviewLayerView(previewLayer: previewLayer)
+                    WebcamPreviewLayer(previewLayer: previewLayer)
                         .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
                         .clipShape(RoundedRectangle(cornerRadius: Defaults[.mirrorShape] == .rectangle ? MusicPlayerImageSizes.cornerRadiusInset.opened : 100))
                         .frame(width: geometry.size.width, height: geometry.size.width)
@@ -70,10 +70,10 @@ struct CameraPreviewView: View {
         case .denied, .restricted:
             DispatchQueue.main.async {
                 let alert = NSAlert()
-                alert.messageText = "Camera Access Required"
-                alert.informativeText = "Please allow camera access in System Settings to use the mirror feature."
-                alert.addButton(withTitle: "Open System Settings")
-                alert.addButton(withTitle: "Cancel")
+                alert.messageText = NSLocalizedString("Camera Access Required", comment: "Camera permission alert title")
+                alert.informativeText = NSLocalizedString("Please allow camera access in System Settings to use the mirror feature.", comment: "Mirror camera permission alert message")
+                alert.addButton(withTitle: NSLocalizedString("Open System Settings", comment: "Button title that opens System Settings"))
+                alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button title"))
 
                 if alert.runModal() == .alertFirstButtonReturn {
                     if let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
@@ -94,7 +94,7 @@ struct CameraPreviewView: View {
     }
 }
 
-struct CameraPreviewLayerView: NSViewRepresentable {
+struct WebcamPreviewLayer: NSViewRepresentable {
     let previewLayer: AVCaptureVideoPreviewLayer
 
     func makeNSView(context: Context) -> NSView {
@@ -115,5 +115,5 @@ struct CameraPreviewLayerView: NSViewRepresentable {
 }
 
 #Preview {
-    CameraPreviewView(webcamManager: .shared)
+    WebcamView(webcamManager: .shared)
 }

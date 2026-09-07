@@ -10,6 +10,7 @@ import Foundation
 import Combine
 import SwiftUI
 
+@MainActor
 final class YouTubeMusicController: MediaControllerProtocol {
     // MARK: - Published Properties
     @Published var playbackState = PlaybackState(
@@ -39,7 +40,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
             try? await Task.sleep(for: .milliseconds(150))
             await updatePlaybackInfo()
         } catch {
-            print("[YouTubeMusicController] Failed to set favorite: \(error)")
+            Log.music.error("[YouTubeMusicController] Failed to set favorite: \(error)")
         }
     }
 
@@ -69,10 +70,15 @@ final class YouTubeMusicController: MediaControllerProtocol {
 
     deinit {
         artworkFetchTask?.cancel()
-        cancelReconnect(resetDelay: false)
+        reconnectTask?.cancel()
         appStateObserver?.cancel()
-        stopPeriodicUpdates()
-        disconnectClient(takeWebSocketClient())
+        updateTimer?.invalidate()
+
+        if let webSocketClient {
+            Task {
+                await webSocketClient.disconnect()
+            }
+        }
     }
     
     // MARK: - MediaControllerProtocol Implementation
@@ -106,7 +112,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
     func toggleShuffle() async { await sendCommand(endpoint: "/shuffle", method: "POST") }
     func toggleRepeat() async { await sendCommand(endpoint: "/switch-repeat", method: "POST") }
 
-    nonisolated func isActive() -> Bool {
+    func isActive() -> Bool {
         NSWorkspace.shared.runningApplications.contains {
             $0.bundleIdentifier == configuration.bundleIdentifier
         }
@@ -146,7 +152,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
         } catch YouTubeMusicError.authenticationRequired {
             await authManager.invalidateToken()
         } catch {
-            print("[YouTubeMusicController] Failed to update playback info: \(error)")
+            Log.music.error("[YouTubeMusicController] Failed to update playback info: \(error)")
         }
     }
     
@@ -222,14 +228,14 @@ final class YouTubeMusicController: MediaControllerProtocol {
             await startPeriodicUpdates()
             await updatePlaybackInfo()
         } catch {
-            print("[YouTubeMusicController] Failed to initialize: \(error)")
+            Log.music.error("[YouTubeMusicController] Failed to initialize: \(error)")
             scheduleReconnect()
         }
     }
     
     private func setupWebSocketIfPossible(token: String) async {
         guard let wsURL = WebSocketURLBuilder.buildURL(from: configuration.baseURL) else {
-            print("[YouTubeMusicController] Failed to build WebSocket URL")
+            Log.music.error("[YouTubeMusicController] Failed to build WebSocket URL")
             return
         }
         
@@ -246,7 +252,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
             try await client.connect(to: wsURL, with: token)
             activateWebSocket(client)
         } catch {
-            print("[YouTubeMusicController] WebSocket connection failed: \(error)")
+            Log.music.error("[YouTubeMusicController] WebSocket connection failed: \(error)")
             scheduleReconnect()
         }
     }
@@ -276,10 +282,14 @@ final class YouTubeMusicController: MediaControllerProtocol {
             }
             guard let newPosition = position else { return }
 
+            // Threshold position updates: the websocket pushes ~1/s (often
+            // more), and an always-new lastUpdated defeated the Equatable
+            // check so every tick republished the whole playback state.
+            guard abs(newPosition - playbackState.currentTime) > 0.25 else { return }
             var copied = playbackState
             copied.currentTime = newPosition
             copied.lastUpdated = Date()
-            if copied != playbackState { playbackState = copied }
+            playbackState = copied
 
         case .repeatChanged:
             guard let data = message.extractData() else { return }
@@ -446,7 +456,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
         } catch YouTubeMusicError.authenticationRequired {
             await authManager.invalidateToken()
         } catch {
-            print("[YouTubeMusicController] Command failed: \(error)")
+            Log.music.error("[YouTubeMusicController] Command failed: \(error)")
         }
     }
     
