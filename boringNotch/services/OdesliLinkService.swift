@@ -14,7 +14,7 @@ struct ShareLinkResult {
     let pageUrl: URL
 }
 
-enum ShareLinkError: Error {
+enum ShareLinkError: Error, Equatable {
     case notFound
     case network
     case rateLimited
@@ -44,7 +44,7 @@ final class OdesliLinkService {
         }
 
         let sourceUrl = try await lookupAppleMusicUrl(kind: kind, title: title, artist: artist, album: album)
-        let pageUrl = try await resolveOdesliPageUrl(for: sourceUrl)
+        let pageUrl = try Self.songLinkPageUrl(kind: kind, appleMusicUrl: sourceUrl)
 
         cache[key] = pageUrl
         return ShareLinkResult(pageUrl: pageUrl)
@@ -250,49 +250,52 @@ final class OdesliLinkService {
         return results
     }
 
-    // MARK: - Odesli
+    // MARK: - song.link page URL
 
-    private func resolveOdesliPageUrl(for sourceUrl: URL) async throws -> URL {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "api.song.link"
-        components.path = "/v1-alpha.1/links"
-        components.queryItems = [
-            URLQueryItem(name: "url", value: sourceUrl.absoluteString)
-        ]
-
-        guard let odesliUrl = components.url else {
-            print("OdesliLinkService: failed to build Odesli URL for source \(sourceUrl.absoluteString)")
+    /// Odesli shut down its public resolution API: `api.song.link/v1-alpha.1`
+    /// now answers `401 PUBLIC_API_ACCESS_DEPRECATED`, and they've stopped
+    /// handing out API keys. The song.link / album.link *front end* still
+    /// resolves a bare Apple catalog id on its own, though, so we build that
+    /// page URL directly from the iTunes Search result instead of asking the
+    /// (dead) API to do it. `i` is Odesli's platform slug for Apple Music.
+    ///
+    /// track:  music.apple.com/<store>/album/<slug>/<albumId>?i=<trackId>  ->  song.link/i/<trackId>
+    /// album:  music.apple.com/<store>/album/<slug>/<albumId>              ->  album.link/i/<albumId>
+    static func songLinkPageUrl(kind: ShareKind, appleMusicUrl: URL) throws -> URL {
+        guard appleMusicUrl.host?.hasSuffix("music.apple.com") == true else {
+            print("OdesliLinkService: unexpected non-Apple-Music source URL \(appleMusicUrl.absoluteString)")
             throw ShareLinkError.notFound
         }
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(from: odesliUrl)
-        } catch {
-            print("OdesliLinkService: Odesli request failed for \(odesliUrl.absoluteString): \(error)")
-            throw ShareLinkError.network
+        let id: String
+        let host: String
+        switch kind {
+        case .track:
+            let components = URLComponents(url: appleMusicUrl, resolvingAgainstBaseURL: false)
+            guard let trackId = components?.queryItems?.first(where: { $0.name == "i" })?.value,
+                  isCatalogId(trackId) else {
+                print("OdesliLinkService: no track id (i=) in \(appleMusicUrl.absoluteString)")
+                throw ShareLinkError.notFound
+            }
+            id = trackId
+            host = "song.link"
+        case .album:
+            guard let albumId = appleMusicUrl.pathComponents.last(where: { isCatalogId($0) }) else {
+                print("OdesliLinkService: no album id in path of \(appleMusicUrl.absoluteString)")
+                throw ShareLinkError.notFound
+            }
+            id = albumId
+            host = "album.link"
         }
 
-        if let http = response as? HTTPURLResponse, http.statusCode == 429 {
-            print("OdesliLinkService: Odesli rate-limited (429) for \(odesliUrl.absoluteString), headers: \(http.allHeaderFields), body: \(String(data: data, encoding: .utf8) ?? "<undecodable>")")
-            throw ShareLinkError.rateLimited
-        }
-
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            print("OdesliLinkService: Odesli returned status \(status) for \(odesliUrl.absoluteString), body: \(String(data: data, encoding: .utf8) ?? "<undecodable>")")
+        guard let url = URL(string: "https://\(host)/i/\(id)") else {
+            print("OdesliLinkService: failed to build song.link URL for id \(id)")
             throw ShareLinkError.notFound
         }
+        return url
+    }
 
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let pageUrlString = json["pageUrl"] as? String,
-              let pageUrl = URL(string: pageUrlString) else {
-            print("OdesliLinkService: couldn't decode Odesli response for \(odesliUrl.absoluteString), body: \(String(data: data, encoding: .utf8) ?? "<undecodable>")")
-            throw ShareLinkError.notFound
-        }
-
-        return pageUrl
+    private static func isCatalogId(_ s: String) -> Bool {
+        !s.isEmpty && s.allSatisfy(\.isNumber)
     }
 }
